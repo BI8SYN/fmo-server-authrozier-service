@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Sas.certs;
 using Sas.Logging;
 using Sas.Tests.Fixtures;
 
@@ -33,6 +34,39 @@ public sealed class HttpAuthHandlerLoggingTests
 
             Assert.Contains("does not match", output);
             Assert.Single(Regex.Matches(output, "does not match"));
+        }
+        finally
+        {
+            Logger.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void UndefinedRole_LogsWarningOnlyOnce()
+    {
+        var writer = new StringWriter();
+        Logger.ResetForTests(stdout: writer, stderr: writer);
+        try
+        {
+            using var env = new AuthTestEnvironment();
+            env.Config.Server.Admins =
+            [
+                new Config.AdminEntry
+                {
+                    Uid = env.Pki.User.Uid,
+                    CertFingerprint = Base64Url.Encode(env.Pki.User.Fingerprint()),
+                    Role = "ops"
+                }
+            ];
+
+            env.Handler.Process(env.Username, env.ValidPassword("ops"), "req-1");
+            env.Handler.Process(env.Username, env.ValidPassword("ops"), "req-2");
+
+            Logger.Flush();
+            var output = writer.ToString();
+
+            Assert.Contains("not defined in roles", output);
+            Assert.Single(Regex.Matches(output, "not defined in roles"));
         }
         finally
         {

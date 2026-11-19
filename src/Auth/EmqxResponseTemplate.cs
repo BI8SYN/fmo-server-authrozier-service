@@ -14,6 +14,11 @@ public sealed class EmqxResponseTemplate : IResponseTemplate
         foreach (var topic in result.SubTopics)
             acl.Add(new EmqxAclEntry { Permission = "allow", Action = "subscribe", Topic = topic });
 
+        // Deny rules go last: EMQX matches in order and the first hit wins,
+        // so a deny must never shadow an allow above it.
+        foreach (var rule in result.DenyRules)
+            acl.Add(new EmqxAclEntry { Permission = "deny", Action = rule.Action, Topic = rule.Topic });
+
         return new EmqxAllowResponse
         {
             Result = "allow",

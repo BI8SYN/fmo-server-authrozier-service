@@ -20,7 +20,12 @@ public sealed class EmqxResponseTemplateTests
         ExpireAt = 1_700_014_400,
         AllTopics = ["FMO/RAW", "FMO/TELE"],
         PubTopics = ["FMO/QSO/+", "FMO/LATE/UID_V1/50001"],
-        SubTopics = ["FMO/QSO/UID/50001"]
+        SubTopics = ["FMO/QSO/UID/50001"],
+        DenyRules =
+        [
+            new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" },
+            new AclDenyRule { Action = "publish", Topic = "FMO/PROFILE" }
+        ]
     };
 
     [Fact]
@@ -38,27 +43,29 @@ public sealed class EmqxResponseTemplateTests
     }
 
     [Fact]
-    public void BuildAllow_EmitsAclInAllThenPublishThenSubscribeOrder()
+    public void BuildAllow_EmitsAllowRulesBeforeDenyRules()
     {
         var acl = Serialize(_template.BuildAllow(AllowResult())).GetProperty("acl");
 
-        Assert.Equal(5, acl.GetArrayLength());
+        Assert.Equal(7, acl.GetArrayLength());
 
-        var actions = acl.EnumerateArray()
-            .Select(e => (e.GetProperty("action").GetString(), e.GetProperty("topic").GetString()))
+        var rules = acl.EnumerateArray()
+            .Select(e => (
+                e.GetProperty("permission").GetString(),
+                e.GetProperty("action").GetString(),
+                e.GetProperty("topic").GetString()))
             .ToArray();
 
         Assert.Equal(
         [
-            ("all", "FMO/RAW"),
-            ("all", "FMO/TELE"),
-            ("publish", "FMO/QSO/+"),
-            ("publish", "FMO/LATE/UID_V1/50001"),
-            ("subscribe", "FMO/QSO/UID/50001")
-        ], actions);
-
-        Assert.All(acl.EnumerateArray(),
-            e => Assert.Equal("allow", e.GetProperty("permission").GetString()));
+            ("allow", "all", "FMO/RAW"),
+            ("allow", "all", "FMO/TELE"),
+            ("allow", "publish", "FMO/QSO/+"),
+            ("allow", "publish", "FMO/LATE/UID_V1/50001"),
+            ("allow", "subscribe", "FMO/QSO/UID/50001"),
+            ("deny", "all", "FMO/SAFEPROBE/#"),
+            ("deny", "publish", "FMO/PROFILE")
+        ], rules);
     }
 
     [Fact]
@@ -85,6 +92,28 @@ public sealed class EmqxResponseTemplateTests
 
         Assert.Equal(JsonValueKind.Array, acl.ValueKind);
         Assert.Equal(0, acl.GetArrayLength());
+    }
+
+    [Fact]
+    public void BuildAllow_WithOnlyDenyRules_EmitsDenyEntries()
+    {
+        var result = new AuthResult
+        {
+            Callsign = "BG6VMZ",
+            Uid = 50001,
+            DenyRules =
+            [
+                new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }
+            ]
+        };
+
+        var acl = Serialize(_template.BuildAllow(result)).GetProperty("acl");
+
+        Assert.Equal(1, acl.GetArrayLength());
+        var entry = acl[0];
+        Assert.Equal("deny", entry.GetProperty("permission").GetString());
+        Assert.Equal("all", entry.GetProperty("action").GetString());
+        Assert.Equal("FMO/SAFEPROBE/#", entry.GetProperty("topic").GetString());
     }
 
     [Fact]

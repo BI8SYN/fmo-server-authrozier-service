@@ -1,5 +1,6 @@
 {
   "role": "admin",
+  "_version": 2,
   "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
   "pub": [
     "FMO/QSO/+",
@@ -10,7 +11,15 @@
     "FMO/QSO/UID/{uid}",
     "FMO/LATE/UID_V1/{uid}",
     "FMO/PROFILE",
+    "FMO/MUTELIST",
     "FMO/REMOTE_CONTROL",
     "FMO/SERVER_INFO/#"
+  ],
+  "deny": [
+    { "action": "all", "topic": "FMO/SAFEPROBE/#" },
+    { "action": "publish", "topic": "FMO/PROFILE" },
+    { "action": "publish", "topic": "FMO/REMOTE_CONTROL" },
+    { "action": "publish", "topic": "FMO/SERVER_INFO/#" },
+    { "action": "all", "topic": "FMO/LATE/UID_V1/#" }
   ]
 }

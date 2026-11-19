@@ -11,4 +11,5 @@ public sealed class AuthResult
     public string[] AllTopics { get; init; } = [];
     public string[] PubTopics { get; init; } = [];
     public string[] SubTopics { get; init; } = [];
+    public AclDenyRule[] DenyRules { get; init; } = [];
 }

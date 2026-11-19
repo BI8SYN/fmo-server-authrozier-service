@@ -43,6 +43,7 @@ public sealed class HttpAuthHandlerTests
         Assert.Contains("FMO/QSO/+", result.PubTopics);
         Assert.Contains($"FMO/QSO/UID/{env.Pki.User.Uid}", result.SubTopics);
         Assert.Contains($"FMO/LATE/UID_V1/{env.Pki.User.Uid}", result.SubTopics);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, result.DenyRules);
     }
 
     [Fact]
@@ -145,6 +146,23 @@ public sealed class HttpAuthHandlerTests
 
         Assert.Equal("admin", result.Role);
         Assert.False(result.IsSuperuser);
+
+        // 管理员只能发布禁言主题。
+        Assert.Contains("FMO/MUTELIST", result.PubTopics);
+        Assert.DoesNotContain("FMO/PROFILE", result.PubTopics);
+        Assert.DoesNotContain("FMO/REMOTE_CONTROL", result.PubTopics);
+        Assert.DoesNotContain("FMO/SERVER_INFO/#", result.PubTopics);
+
+        // 订阅保留。
+        Assert.Contains("FMO/PROFILE", result.SubTopics);
+        Assert.Contains("FMO/REMOTE_CONTROL", result.SubTopics);
+        Assert.Contains("FMO/SERVER_INFO/#", result.SubTopics);
+
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, result.DenyRules);
+        Assert.Contains(new AclDenyRule { Action = "publish", Topic = "FMO/PROFILE" }, result.DenyRules);
+        Assert.Contains(new AclDenyRule { Action = "publish", Topic = "FMO/REMOTE_CONTROL" }, result.DenyRules);
+        Assert.Contains(new AclDenyRule { Action = "publish", Topic = "FMO/SERVER_INFO/#" }, result.DenyRules);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/LATE/UID_V1/#" }, result.DenyRules);
     }
 
     [Fact]
@@ -164,6 +182,30 @@ public sealed class HttpAuthHandlerTests
         var result = env.Handler.Process(env.Username, env.ValidPassword("ops"), "req-test");
 
         Assert.Equal("ops", result.Role);
+    }
+
+    [Fact]
+    public void Process_AdminWithUndefinedRole_FallsBackToUserPermissions()
+    {
+        using var env = new AuthTestEnvironment();
+        env.Config.Server.Admins =
+        [
+            new Config.AdminEntry
+            {
+                Uid = env.Pki.User.Uid,
+                CertFingerprint = Base64Url.Encode(env.Pki.User.Fingerprint()),
+                Role = "ops"
+            }
+        ];
+
+        var result = env.Handler.Process(env.Username, env.ValidPassword("ops"), "req-test");
+
+        // 角色名保留，便于排查；权限必须回退到 user，而不是空 ACL。
+        Assert.Equal("ops", result.Role);
+        Assert.False(result.IsSuperuser);
+        Assert.DoesNotContain("FMO/MUTELIST", result.PubTopics);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, result.DenyRules);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/LATE/UID_V1/#" }, result.DenyRules);
     }
 
     [Fact]

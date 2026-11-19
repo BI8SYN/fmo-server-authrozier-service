@@ -23,9 +23,19 @@ public sealed class AclStoreTests
         Assert.DoesNotContain("FMO/MUTELIST", user.pub);
         Assert.Contains("FMO/QSO/UID/{uid}", user.sub);
         Assert.Contains("FMO/PROFILE", user.sub);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, user.deny);
+        Assert.Contains(new AclDenyRule { Action = "publish", Topic = "FMO/PROFILE" }, user.deny);
 
         Assert.Contains("FMO/MUTELIST", admin.pub);
+        Assert.DoesNotContain("FMO/PROFILE", admin.pub);
+        Assert.DoesNotContain("FMO/REMOTE_CONTROL", admin.pub);
+        Assert.DoesNotContain("FMO/SERVER_INFO/#", admin.pub);
         Assert.Contains("FMO/PROFILE", admin.sub);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, admin.deny);
+        Assert.Contains(new AclDenyRule { Action = "publish", Topic = "FMO/PROFILE" }, admin.deny);
+        Assert.Contains(new AclDenyRule { Action = "publish", Topic = "FMO/REMOTE_CONTROL" }, admin.deny);
+        Assert.Contains(new AclDenyRule { Action = "publish", Topic = "FMO/SERVER_INFO/#" }, admin.deny);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/LATE/UID_V1/#" }, admin.deny);
     }
 
     [Theory]
@@ -43,6 +53,48 @@ public sealed class AclStoreTests
         Assert.Equal(user.all, actual.all);
         Assert.Equal(user.pub, actual.pub);
         Assert.Equal(user.sub, actual.sub);
+        // deny 也必须一起回退，否则 SAFEPROBE / LATE 限制会丢失。
+        Assert.Equal(user.deny, actual.deny);
+        Assert.NotEmpty(actual.deny);
+    }
+
+    [Theory]
+    [InlineData("User")]
+    [InlineData("ADMIN")]
+    [InlineData("sUpEr")]
+    public void RoleName_IsCaseInsensitive(string role)
+    {
+        using var temp = new TempDirectory("acl-role-case");
+        var store = new AclStore(temp.CreateSubdirectory("roles"));
+
+        var expected = store.GetPermissions(role.ToLowerInvariant());
+        var actual = store.GetPermissions(role);
+
+        Assert.True(store.HasRole(role));
+        Assert.Equal(expected.all, actual.all);
+        Assert.Equal(expected.pub, actual.pub);
+        Assert.Equal(expected.sub, actual.sub);
+        Assert.Equal(expected.deny, actual.deny);
+    }
+
+    [Fact]
+    public void GetPermissions_ReturnsCopy_CallerCannotMutateStore()
+    {
+        using var temp = new TempDirectory("acl-return-copy");
+        var store = new AclStore(temp.CreateSubdirectory("roles"));
+
+        var first = store.GetPermissions("admin");
+        first.all[0] = "FMO/MUTATED";
+        first.pub[0] = "FMO/MUTATED";
+        first.sub[0] = "FMO/MUTATED";
+        first.deny[0] = new AclDenyRule { Action = "all", Topic = "FMO/MUTATED" };
+
+        var second = store.GetPermissions("admin");
+
+        Assert.DoesNotContain("FMO/MUTATED", second.all);
+        Assert.DoesNotContain("FMO/MUTATED", second.pub);
+        Assert.DoesNotContain("FMO/MUTATED", second.sub);
+        Assert.DoesNotContain(new AclDenyRule { Action = "all", Topic = "FMO/MUTATED" }, second.deny);
     }
 
     [Fact]
@@ -121,34 +173,323 @@ public sealed class AclStoreTests
     }
 
     [Fact]
-    public void HardcodedDefaults_MatchEmbeddedRoleJson()
+    public void ResolveForUid_ReplacesPlaceholderInDenyRules()
     {
-        using var temp = new TempDirectory("acl-embedded");
+        using var temp = new TempDirectory("acl-resolve-deny");
         var store = new AclStore(temp.CreateSubdirectory("roles"));
 
-        var embedded = new[]
+        var resolved = store.ResolveForUid(
+            [
+                new AclDenyRule { Action = "all", Topic = "FMO/X/{uid}/#" },
+                new AclDenyRule { Action = "publish", Topic = "FMO/STATIC" }
+            ],
+            5001);
+
+        Assert.Equal(
+            [
+                new AclDenyRule { Action = "all", Topic = "FMO/X/5001/#" },
+                new AclDenyRule { Action = "publish", Topic = "FMO/STATIC" }
+            ],
+            resolved);
+    }
+
+    [Theory]
+    [InlineData("user.json")]
+    [InlineData("admin.json")]
+    [InlineData("super.json")]
+    public void OlderShippedDefaultRoleFile_IsUpgradedAndBackedUp(string fileName)
+    {
+        using var temp = new TempDirectory("acl-sync-default");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var roleFile = Path.Combine(rolesDir, fileName);
+
+        var v1 = fileName switch
         {
-            store.GetPermissions("super"),
-            store.GetPermissions("admin"),
-            store.GetPermissions("user")
+            "user.json" => UserV1Json,
+            "admin.json" => AdminV1Json,
+            "super.json" => SuperV1Json,
+            _ => throw new ArgumentOutOfRangeException(nameof(fileName))
         };
 
-        store.LoadHardcodedDefaults();
+        File.WriteAllText(roleFile, v1);
 
-        var hardcoded = new[]
+        var store = new AclStore(rolesDir);
+
+        // 备份必须保留旧文件原样。
+        Assert.Equal(v1, File.ReadAllText(roleFile + ".bak"));
+
+        // 服务器文件必须已替换为当前内置模板。
+        var builtinFile = Path.Combine(AppContext.BaseDirectory, "builtin", "roles", fileName);
+        Assert.Equal(
+            RoleJson.Hash(File.ReadAllText(builtinFile)),
+            RoleJson.Hash(File.ReadAllText(roleFile)));
+
+        using var doc = JsonDocument.Parse(File.ReadAllText(roleFile));
+        Assert.Equal(2, doc.RootElement.GetProperty("_version").GetInt32());
+
+        // 加载结果必须反映升级后的规则。
+        var role = doc.RootElement.GetProperty("role").GetString()!;
+        var acl = store.GetPermissions(role);
+        var expectedDenyCount = fileName switch
         {
-            store.GetPermissions("super"),
-            store.GetPermissions("admin"),
-            store.GetPermissions("user")
+            "user.json" => 6,
+            "admin.json" => 5,
+            _ => 0
         };
+        Assert.Equal(expectedDenyCount, acl.deny.Length);
+    }
 
-        for (var i = 0; i < embedded.Length; i++)
+    [Fact]
+    public void CustomisedRoleFile_IsNotUpgraded()
+    {
+        using var temp = new TempDirectory("acl-sync-custom");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var userFile = Path.Combine(rolesDir, "user.json");
+
+        var custom = UserV1Json.Replace(
+            "\"FMO/QSO/+\"",
+            "\"FMO/QSO/+\", \"FMO/CUSTOM/#\"");
+        File.WriteAllText(userFile, custom);
+
+        var store = new AclStore(rolesDir);
+
+        var user = store.GetPermissions("user");
+        Assert.Contains("FMO/CUSTOM/#", user.pub);
+        Assert.Empty(user.deny);
+        Assert.False(File.Exists(userFile + ".bak"));
+    }
+
+    [Fact]
+    public void NewerRoleFileVersion_IsKept()
+    {
+        using var temp = new TempDirectory("acl-sync-newer");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var userFile = Path.Combine(rolesDir, "user.json");
+        File.WriteAllText(userFile, """
+            {
+              "role": "user",
+              "_version": 99,
+              "all": ["FMO/FUTURE"],
+              "pub": ["FMO/FUTURE/PUB"],
+              "sub": ["FMO/FUTURE/SUB"],
+              "deny": []
+            }
+            """);
+
+        var store = new AclStore(rolesDir);
+
+        var user = store.GetPermissions("user");
+        Assert.Equal(["FMO/FUTURE"], user.all);
+        Assert.False(File.Exists(userFile + ".bak"));
+    }
+
+    [Fact]
+    public void SameVersionCustomisedRoleFile_IsKept()
+    {
+        using var temp = new TempDirectory("acl-sync-same-version");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var userFile = Path.Combine(rolesDir, "user.json");
+        File.WriteAllText(userFile, """
+            {
+              "role": "user",
+              "_version": 2,
+              "all": ["FMO/RAW"],
+              "pub": ["FMO/CUSTOM/PUB"],
+              "sub": ["FMO/CUSTOM/SUB"],
+              "deny": []
+            }
+            """);
+
+        var store = new AclStore(rolesDir);
+
+        var user = store.GetPermissions("user");
+        Assert.Equal(["FMO/CUSTOM/PUB"], user.pub);
+        Assert.False(File.Exists(userFile + ".bak"));
+    }
+
+    [Fact]
+    public void CorruptBuiltinRoleFile_IsKeptButBuiltinRulesUsedInMemory()
+    {
+        using var temp = new TempDirectory("acl-corrupt-builtin");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        Directory.CreateDirectory(rolesDir);
+
+        // 先把内置文件播种出来，再把 user.json 改坏，模拟用户手工编辑失败。
+        _ = new AclStore(rolesDir);
+        var userFile = Path.Combine(rolesDir, "user.json");
+        const string corrupt = "{ this is not json";
+        File.WriteAllText(userFile, corrupt);
+
+        // 损坏文件不能阻塞启动。
+        var store = new AclStore(rolesDir);
+
+        // 文件必须原样保留，便于用户修复。
+        Assert.Equal(corrupt, File.ReadAllText(userFile));
+
+        // 内存中必须回退到内置规则，而不是空 ACL（空 ACL 等于全放行）。
+        var user = store.GetPermissions("user");
+        Assert.Contains("FMO/QSO/+", user.pub);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, user.deny);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/LATE/UID_V1/#" }, user.deny);
+    }
+
+    [Fact]
+    public void MismatchedRoleName_IsKeptButBuiltinRulesUsedInMemory()
+    {
+        using var temp = new TempDirectory("acl-mismatched-role");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var userFile = Path.Combine(rolesDir, "user.json");
+
+        // user.json 声明成 admin，试图冒充管理员角色。
+        File.WriteAllText(userFile, """
+            {
+              "role": "admin",
+              "_version": 2,
+              "all": ["FMO/INJECTED"],
+              "pub": ["FMO/INJECTED/PUB"],
+              "sub": ["FMO/INJECTED/SUB"],
+              "deny": []
+            }
+            """);
+
+        var store = new AclStore(rolesDir);
+
+        // 文件保留，但不会被当成 admin 加载。
+        Assert.Contains("FMO/INJECTED", File.ReadAllText(userFile));
+        Assert.DoesNotContain("FMO/INJECTED", store.GetPermissions("admin").all);
+
+        // 真正的 user 角色必须回退到内置规则。
+        var user = store.GetPermissions("user");
+        Assert.Contains("FMO/QSO/+", user.pub);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/LATE/UID_V1/#" }, user.deny);
+    }
+
+    [Fact]
+    public void SecondStartup_DoesNotRewriteOrBackup()
+    {
+        using var temp = new TempDirectory("acl-idempotent");
+        var rolesDir = temp.CreateSubdirectory("roles");
+
+        _ = new AclStore(rolesDir);
+        var userFile = Path.Combine(rolesDir, "user.json");
+        var before = File.ReadAllText(userFile);
+        var stampBefore = File.GetLastWriteTimeUtc(userFile);
+
+        _ = new AclStore(rolesDir);
+
+        Assert.Equal(before, File.ReadAllText(userFile));
+        Assert.Equal(stampBefore, File.GetLastWriteTimeUtc(userFile));
+        Assert.False(File.Exists(userFile + ".bak"));
+    }
+
+    [Fact]
+    public void SameVersionEquivalentContent_IsNotRewritten()
+    {
+        using var temp = new TempDirectory("acl-same-version-equivalent");
+        var rolesDir = temp.CreateSubdirectory("roles");
+
+        // 先取得当前内置 user 模板，再以不同空白和键顺序写回。
+        var seededDir = temp.CreateSubdirectory("seeded");
+        _ = new AclStore(seededDir);
+        var builtinText = File.ReadAllText(Path.Combine(seededDir, "user.json"));
+
+        var equivalent = JsonSerializer.Serialize(
+            JsonDocument.Parse(builtinText).RootElement,
+            new JsonSerializerOptions { WriteIndented = true });
+        var userFile = Path.Combine(rolesDir, "user.json");
+        File.WriteAllText(userFile, equivalent);
+
+        _ = new AclStore(rolesDir);
+
+        // 规范化后内容相同，必须视为未修改，既不重写也不备份。
+        Assert.Equal(equivalent, File.ReadAllText(userFile));
+        Assert.False(File.Exists(userFile + ".bak"));
+    }
+
+    [Fact]
+    public void ReadOnlyRoleFile_FallsBackToBuiltinInMemory()
+    {
+        using var temp = new TempDirectory("acl-readonly");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var userFile = Path.Combine(rolesDir, "user.json");
+        File.WriteAllText(userFile, UserV1Json);
+        File.SetAttributes(userFile, FileAttributes.ReadOnly);
+
+        try
         {
-            Assert.Equal(embedded[i].all, hardcoded[i].all);
-            Assert.Equal(embedded[i].pub, hardcoded[i].pub);
-            Assert.Equal(embedded[i].sub, hardcoded[i].sub);
+            // 版本落后且匹配历史默认，会尝试升级；只读导致写入失败。
+            var store = new AclStore(rolesDir);
+
+            // 规则仍然必须生效（内存使用内置模板）。
+            var user = store.GetPermissions("user");
+            Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, user.deny);
+            Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/LATE/UID_V1/#" }, user.deny);
+
+            // 原文件保持旧内容，没有被部分写入。
+            Assert.Equal(UserV1Json, File.ReadAllText(userFile));
+        }
+        finally
+        {
+            File.SetAttributes(userFile, FileAttributes.Normal);
         }
     }
+
+    private const string UserV1Json = """
+        {
+          "role": "user",
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/MUTELIST",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO/#"
+          ]
+        }
+        """;
+
+    private const string AdminV1Json = """
+        {
+          "role": "admin",
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/MUTELIST"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO/#"
+          ]
+        }
+        """;
+
+    private const string SuperV1Json = """
+        {
+          "role": "super",
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/MUTELIST",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO/#"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}"
+          ]
+        }
+        """;
 
     [Fact]
     public void SeededBuiltinRoles_MatchBuiltinJsonFiles()
@@ -174,5 +515,104 @@ public sealed class AclStoreTests
         Assert.Equal(expectedPub, admin.pub);
         Assert.Equal(expectedSub, admin.sub);
         Assert.Contains("FMO/PROFILE", admin.sub);
+        Assert.DoesNotContain("FMO/PROFILE", admin.pub);
+        Assert.DoesNotContain("FMO/REMOTE_CONTROL", admin.pub);
+        Assert.DoesNotContain("FMO/SERVER_INFO/#", admin.pub);
+    }
+
+    [Fact]
+    public void Admin_CannotPublishManagementTopics()
+    {
+        using var temp = new TempDirectory("acl-admin-publish");
+        var store = new AclStore(temp.CreateSubdirectory("roles"));
+
+        var admin = store.GetPermissions("admin");
+
+        // 管理员只能发布禁言主题。
+        Assert.Contains("FMO/MUTELIST", admin.pub);
+
+        // 三个管理主题必须由 deny 阻断；仅从 pub 删除不足，因为 EMQX
+        // no_match 默认 allow。
+        var denied = admin.deny
+            .Where(r => r.Action == "publish")
+            .Select(r => r.Topic)
+            .ToArray();
+
+        Assert.Contains("FMO/PROFILE", denied);
+        Assert.Contains("FMO/REMOTE_CONTROL", denied);
+        Assert.Contains("FMO/SERVER_INFO/#", denied);
+
+        // 订阅仍然保留，管理端可以观察这些主题。
+        Assert.Contains("FMO/PROFILE", admin.sub);
+        Assert.Contains("FMO/REMOTE_CONTROL", admin.sub);
+        Assert.Contains("FMO/SERVER_INFO/#", admin.sub);
+    }
+
+    [Theory]
+    [InlineData("user.json", "user")]
+    [InlineData("admin.json", "admin")]
+    [InlineData("super.json", "super")]
+    public void EmbeddedTemplate_IsWellFormed(string fileName, string expectedRole)
+    {
+        var text = ReadEmbeddedTemplate(fileName);
+        using var doc = JsonDocument.Parse(text);
+        var root = doc.RootElement;
+
+        // 文件名与角色名必须一致，否则加载时会被拒绝并回退内置规则。
+        Assert.Equal(expectedRole, root.GetProperty("role").GetString());
+
+        // 当前发布版本必须带 _version，升级逻辑依赖它。
+        Assert.Equal(2, root.GetProperty("_version").GetInt32());
+
+        foreach (var key in new[] { "all", "pub", "sub", "deny" })
+        {
+            if (!root.TryGetProperty(key, out var rules))
+                continue;
+
+            foreach (var rule in rules.EnumerateArray())
+            {
+                if (key == "deny")
+                {
+                    var action = rule.GetProperty("action").GetString();
+                    Assert.Contains(action, new[] { "all", "publish", "subscribe" });
+                    Assert.False(string.IsNullOrWhiteSpace(rule.GetProperty("topic").GetString()));
+                }
+                else
+                {
+                    Assert.False(string.IsNullOrWhiteSpace(rule.GetString()));
+                }
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("user.json")]
+    [InlineData("admin.json")]
+    [InlineData("super.json")]
+    public void BuiltinRoleHistory_DoesNotContainCurrentTemplate(string fileName)
+    {
+        var text = ReadEmbeddedTemplate(fileName);
+        var hash = RoleJson.Hash(text);
+
+        Assert.NotNull(hash);
+
+        // 当前模板绝不能同时算作“历史默认”。否则已经是最新版本的部署
+        // 也会被判定为可升级，覆盖掉主人正在使用的文件。
+        Assert.False(BuiltinRoleHistory.IsDefault(fileName, hash!));
+    }
+
+    [Fact]
+    public void BuiltinRoleHistory_RejectsUnknownFile()
+    {
+        Assert.False(BuiltinRoleHistory.IsDefault("no-such-role.json", "any"));
+    }
+
+    private static string ReadEmbeddedTemplate(string fileName)
+    {
+        var assembly = typeof(AclStore).Assembly;
+        using var stream = assembly.GetManifestResourceStream("builtin.roles." + fileName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        return reader.ReadToEnd();
     }
 }

@@ -19,6 +19,9 @@ internal sealed class HttpAuthHandler : IAuthHandler
     private readonly TimeProvider _time;
     private readonly Random _random;
 
+    private readonly HashSet<string> _undefinedRolesWarned =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public HttpAuthHandler(Config config, RootCaStore rootStore,
         CertVerifier verifier, ICrlPolicy crlManager, AclStore aclStore,
         IArchiveSink archive, TimeProvider? time = null, Random? random = null)
@@ -265,11 +268,23 @@ internal sealed class HttpAuthHandler : IAuthHandler
             throw Deny(ctx, "proof invalid");
 
         var isSuperuser = role == "super";
-        var (allDefs, pubDefs, subDefs) = _aclStore.GetPermissions(role);
+
+        if (!_aclStore.HasRole(role))
+        {
+            bool first;
+            lock (_undefinedRolesWarned)
+                first = _undefinedRolesWarned.Add(role);
+
+            if (first)
+                Logger.Warn($"HTTP auth: role '{LogSafe.Format(role, 16)}' is not defined in roles/*.json; falling back to user permissions");
+        }
+
+        var (allDefs, pubDefs, subDefs, denyDefs) = _aclStore.GetPermissions(role);
 
         var allTopics = _aclStore.ResolveForUid(allDefs, user.Uid);
         var pubTopics = _aclStore.ResolveForUid(pubDefs, user.Uid);
         var subTopics = _aclStore.ResolveForUid(subDefs, user.Uid);
+        var denyRules = _aclStore.ResolveForUid(denyDefs, user.Uid);
 
         const int ttlJitterSec = 60;
         var maxJitter = Math.Min(ttlJitterSec, Math.Max(1, _config.Http.TtlSec / 2));
@@ -288,7 +303,8 @@ internal sealed class HttpAuthHandler : IAuthHandler
             ExpireAt = exp,
             AllTopics = allTopics,
             PubTopics = pubTopics,
-            SubTopics = subTopics
+            SubTopics = subTopics,
+            DenyRules = denyRules
         };
     }
 

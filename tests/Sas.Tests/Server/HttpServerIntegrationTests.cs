@@ -43,6 +43,28 @@ public sealed class HttpServerIntegrationTests
     }
 
     [Fact]
+    public async Task Post_ValidCredentials_AclEmitsDenyAfterAllow()
+    {
+        using var env = new AuthTestEnvironment();
+        await using var server = new HttpServerHarness(env.Handler, new EmqxResponseTemplate(), UnlimitedLimiter());
+        using var client = server.CreateClient();
+
+        var response = await client.PostAsync("auth", Body(env.Username, env.ValidPassword()));
+        var acl = (await ReadJson(response)).GetProperty("acl").EnumerateArray().ToArray();
+
+        var lastAllow = Array.FindLastIndex(acl,
+            e => e.GetProperty("permission").GetString() == "allow");
+        var firstDeny = Array.FindIndex(acl,
+            e => e.GetProperty("permission").GetString() == "deny");
+
+        Assert.True(lastAllow >= 0);
+        Assert.True(firstDeny > lastAllow, "deny rules must come after allow rules");
+        Assert.Contains(acl, e =>
+            e.GetProperty("permission").GetString() == "deny" &&
+            e.GetProperty("topic").GetString() == "FMO/SAFEPROBE/#");
+    }
+
+    [Fact]
     public async Task Get_IsDenied()
     {
         using var env = new AuthTestEnvironment();
