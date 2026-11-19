@@ -19,6 +19,10 @@ public sealed class AclStoreTests
         Assert.NotEmpty(super.pub);
         Assert.NotEmpty(super.sub);
         Assert.Contains("FMO/MUTELIST", super.pub);
+        Assert.Contains("FMO/PROFILE", super.sub);
+        Assert.Contains("FMO/MUTELIST", super.sub);
+        Assert.Contains("FMO/REMOTE_CONTROL", super.sub);
+        Assert.Contains("FMO/SERVER_INFO/#", super.sub);
 
         Assert.DoesNotContain("FMO/MUTELIST", user.pub);
         Assert.Contains("FMO/QSO/UID/{uid}", user.sub);

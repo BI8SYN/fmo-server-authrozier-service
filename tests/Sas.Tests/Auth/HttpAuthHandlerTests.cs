@@ -59,6 +59,12 @@ public sealed class HttpAuthHandlerTests
         Assert.Equal("super", result.Role);
         Assert.True(result.IsSuperuser);
         Assert.Contains("FMO/MUTELIST", result.PubTopics);
+
+        // 规则文件自身必须完整，即使 is_superuser 让 EMQX 跳过 ACL。
+        Assert.Contains("FMO/PROFILE", result.SubTopics);
+        Assert.Contains("FMO/MUTELIST", result.SubTopics);
+        Assert.Contains("FMO/REMOTE_CONTROL", result.SubTopics);
+        Assert.Contains("FMO/SERVER_INFO/#", result.SubTopics);
     }
 
     [Fact]

@@ -12,7 +12,11 @@
   ],
   "sub": [
     "FMO/QSO/UID/{uid}",
-    "FMO/LATE/UID_V1/{uid}"
+    "FMO/LATE/UID_V1/{uid}",
+    "FMO/PROFILE",
+    "FMO/MUTELIST",
+    "FMO/REMOTE_CONTROL",
+    "FMO/SERVER_INFO/#"
   ],
   "deny": []
 }
