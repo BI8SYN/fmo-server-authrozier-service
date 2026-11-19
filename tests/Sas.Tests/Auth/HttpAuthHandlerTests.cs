@@ -65,6 +65,7 @@ public sealed class HttpAuthHandlerTests
         Assert.Contains("FMO/MUTELIST", result.SubTopics);
         Assert.Contains("FMO/REMOTE_CONTROL", result.SubTopics);
         Assert.Contains("FMO/SERVER_INFO/#", result.SubTopics);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, result.DenyRules);
     }
 
     [Fact]

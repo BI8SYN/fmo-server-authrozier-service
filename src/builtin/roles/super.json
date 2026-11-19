@@ -18,5 +18,7 @@
     "FMO/REMOTE_CONTROL",
     "FMO/SERVER_INFO/#"
   ],
-  "deny": []
+  "deny": [
+    { "action": "all", "topic": "FMO/SAFEPROBE/#" }
+  ]
 }

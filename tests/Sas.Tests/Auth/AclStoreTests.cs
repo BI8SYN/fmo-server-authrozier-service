@@ -23,6 +23,7 @@ public sealed class AclStoreTests
         Assert.Contains("FMO/MUTELIST", super.sub);
         Assert.Contains("FMO/REMOTE_CONTROL", super.sub);
         Assert.Contains("FMO/SERVER_INFO/#", super.sub);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, super.deny);
 
         Assert.DoesNotContain("FMO/MUTELIST", user.pub);
         Assert.Contains("FMO/QSO/UID/{uid}", user.sub);
@@ -238,6 +239,7 @@ public sealed class AclStoreTests
         {
             "user.json" => 6,
             "admin.json" => 5,
+            "super.json" => 1,
             _ => 0
         };
         Assert.Equal(expectedDenyCount, acl.deny.Length);
