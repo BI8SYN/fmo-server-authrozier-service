@@ -43,6 +43,30 @@ public sealed class HttpServerIntegrationTests
     }
 
     [Fact]
+    public async Task Post_ValidCredentials_ReturnsVerifiedRootAndUserFingerprints()
+    {
+        using var env = new AuthTestEnvironment();
+        // Use a distinct client certificate so a response using the target
+        // server fingerprint instead cannot satisfy this test.
+        var clientPki = TestPki.CreateWithRoot(env.Pki, new TestPkiOptions { Seed = 42, IssuerSn = 1042 });
+        var password = clientPki.BuildPassword(
+            env.ServerUid, env.Config.Server.Callsign, env.ServerUid,
+            env.Config.Mqtt.Host, env.Config.Mqtt.Port, env.ServerFingerprint, env.Now, "user");
+        await using var server = new HttpServerHarness(env.Handler, new EmqxResponseTemplate(), UnlimitedLimiter());
+        using var client = server.CreateClient();
+
+        var response = await client.PostAsync("auth", Body(clientPki.User.Callsign, password));
+
+        var json = await ReadJson(response);
+        Assert.Equal("allow", json.GetProperty("result").GetString());
+        var attrs = json.GetProperty("client_attrs");
+        Assert.True(attrs.TryGetProperty("fmo_root_fingerprint", out var root), "Root fingerprint is missing");
+        Assert.Equal(System.Buffers.Text.Base64Url.EncodeToString(env.Pki.Root.Fingerprint()), root.GetString());
+        Assert.True(attrs.TryGetProperty("fmo_user_fingerprint", out var user), "User fingerprint is missing");
+        Assert.Equal(System.Buffers.Text.Base64Url.EncodeToString(clientPki.User.Fingerprint()), user.GetString());
+    }
+
+    [Fact]
     public async Task Post_ValidCredentials_AclEmitsDenyAfterAllow()
     {
         using var env = new AuthTestEnvironment();
@@ -233,7 +257,9 @@ public sealed class HttpServerIntegrationTests
         var response = await client.PostAsync("auth", Body(env.Username, env.ValidPassword()));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("deny", (await ReadJson(response)).GetProperty("result").GetString());
+        var json = await ReadJson(response);
+        Assert.Equal("deny", json.GetProperty("result").GetString());
+        Assert.False(json.TryGetProperty("client_attrs", out _));
     }
 
     [Fact]

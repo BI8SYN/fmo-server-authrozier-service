@@ -228,6 +228,8 @@ Headers: { "content-type": "application/json" }
 Body: { "username": "${username}", "password": "${password}" }
 ```
 
+On successful authentication, `client_attrs` includes `fmo_root_fingerprint` (the matched, verified trust root) and `fmo_user_fingerprint` (the verified user's certificate, not the destination server's), in addition to `callsign` and `uid`. Both are SHA-256 fingerprints of the certificate's to-be-signed CBOR, encoded as unpadded Base64URL. Audit rules can select these attributes to attribute events to the verified certificates. Denials do not include them.
+
 ---
 
 ## Configuration Reference
