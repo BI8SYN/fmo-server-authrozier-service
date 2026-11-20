@@ -88,6 +88,31 @@ public sealed class HttpServerIntegrationTests
             e.GetProperty("topic").GetString() == "FMO/SAFEPROBE/#");
     }
 
+    [Theory]
+    [InlineData("root@example.test", "issuer@example.test", "root@example.test")]
+    [InlineData("", "issuer@example.test", "issuer@example.test")]
+    [InlineData("CA <root@example.test>", "issuer@example.test", "issuer@example.test")]
+    [InlineData("root@example.test, other@example.test", "", null)]
+    [InlineData("", "broken-address", null)]
+    public async Task Post_ValidCredentials_ReturnsFirstUsableVerifiedCaContact(
+        string rootEmail, string intermediateEmail, string? expected)
+    {
+        using var env = new AuthTestEnvironment(pki: new TestPkiOptions
+        {
+            RootEmail = rootEmail,
+            IntermediateEmail = intermediateEmail,
+        });
+        await using var server = new HttpServerHarness(env.Handler, new EmqxResponseTemplate(), UnlimitedLimiter());
+        using var client = server.CreateClient();
+
+        var json = await ReadJson(await client.PostAsync("auth", Body(env.Username, env.ValidPassword())));
+        Assert.Equal("allow", json.GetProperty("result").GetString());
+        var attrs = json.GetProperty("client_attrs");
+        var hasContact = attrs.TryGetProperty("fmo_ca_contact_email", out var contact);
+        Assert.Equal(expected != null, hasContact);
+        if (hasContact) Assert.Equal(expected, contact.GetString());
+    }
+
     [Fact]
     public async Task Get_IsDenied()
     {

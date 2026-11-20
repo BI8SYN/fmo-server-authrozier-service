@@ -300,6 +300,7 @@ internal sealed class HttpAuthHandler : IAuthHandler
             Uid = user.Uid,
             RootFingerprint = Base64Url.Encode(rootFp),
             UserFingerprint = Base64Url.Encode(userFp),
+            CaContactEmail = UsableMailbox(root.IssuerEmail) ?? UsableMailbox(intermediate.SubjectEmail),
             Role = role,
             IsSuperuser = isSuperuser,
             IssuedAt = now,
@@ -346,6 +347,12 @@ internal sealed class HttpAuthHandler : IAuthHandler
 
     private static string Sn(long? value) =>
         value?.ToString(CultureInfo.InvariantCulture) ?? "?";
+
+    private static string? UsableMailbox(string email) =>
+        !string.IsNullOrWhiteSpace(email) && !email.Any(char.IsControl) &&
+        System.Net.Mail.MailAddress.TryCreate(email, out var address) && address.Address == email
+            ? email
+            : null;
 
     private int _serverFpMismatchLogged;
 
