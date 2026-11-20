@@ -1,6 +1,6 @@
 {
   "role": "super",
-  "_version": 2,
+  "_version": 3,
   "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
   "pub": [
     "FMO/QSO/+",

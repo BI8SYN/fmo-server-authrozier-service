@@ -113,7 +113,18 @@ public sealed class AclStore
                 }
 
                 var fileName = name[ResourcePrefix.Length..];
-                _builtinTemplates[fileName] = new BuiltinTemplate(acl, text);
+
+                // Active templates must be flat "<role>.json". Anything else
+                // (for example a mis-prefixed history resource) would be
+                // seeded as if it were a role and must be rejected.
+                if (!fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
+                    fileName[..^".json".Length].Contains('.'))
+                {
+                    Logger.Error($"ACL roles: unexpected embedded template {name}, ignoring");
+                    continue;
+                }
+
+                _builtinTemplates[fileName] = new BuiltinTemplate(acl, text, RoleJson.Hash(text));
                 Logger.Info($"Loaded built-in role: {acl.Role} ({fileName})");
             }
             catch (Exception ex)
@@ -212,34 +223,55 @@ public sealed class AclStore
             return;
         }
 
+        if (serverHash == template.Hash)
+            return;
+
+        var isShippedDefault = BuiltinRoleHistory.IsDefault(name, serverHash);
+
         if (serverAcl.Version == builtinAcl.Version)
         {
-            if (serverHash == RoleJson.Hash(template.Text))
+            if (!isShippedDefault)
+            {
+                Logger.Info($"ACL roles: {name} was customised (version {serverAcl.Version}), keeping as-is");
                 return;
+            }
 
-            Logger.Info($"ACL roles: {name} was customised (version {serverAcl.Version}), keeping as-is");
+            // Same version but a known shipped default means a release forgot
+            // to bump _version. The content is not the owner's, so repair it.
+            Logger.Warn(
+                $"ACL roles: {name} matches a shipped default from an earlier build " +
+                $"with the same version {serverAcl.Version}; syncing to builtin (backup: {name}.bak)");
+            ApplyTemplate(name, dest, template, serverAcl.Version);
             return;
         }
 
         // The server file is older than the builtin template. Only replace it
         // when its canonical content matches a shipped default; otherwise the
         // owner has customised the file and it must be left alone.
-        if (!BuiltinRoleHistory.IsDefault(name, serverHash))
+        if (!isShippedDefault)
         {
-            Logger.Info($"ACL roles: {name} was customised (version {serverAcl.Version}), keeping as-is; builtin version is {builtinAcl.Version}");
+            Logger.Info(
+                $"ACL roles: {name} is not a known shipped default (version {serverAcl.Version}), " +
+                $"keeping as-is; builtin version is {builtinAcl.Version}");
             return;
         }
 
+        ApplyTemplate(name, dest, template, serverAcl.Version);
+    }
+
+    /// <summary>Backs up <paramref name="dest"/> and replaces it with the builtin template.</summary>
+    private void ApplyTemplate(string name, string dest, BuiltinTemplate template, int fromVersion)
+    {
         try
         {
             File.Copy(dest, dest + ".bak", overwrite: true);
             File.WriteAllText(dest, template.Text);
-            Logger.Info($"ACL roles: synced {name} v{serverAcl.Version} -> v{builtinAcl.Version} (backup: {name}.bak)");
+            Logger.Info($"ACL roles: synced {name} v{fromVersion} -> v{template.Acl.Version} (backup: {name}.bak)");
         }
         catch (Exception ex)
         {
             Logger.Warn($"ACL roles: cannot update {name} ({ex.Message}); using builtin rules in memory");
-            _overridesWithBuiltin.Add(builtinAcl.Role);
+            _overridesWithBuiltin.Add(template.Acl.Role);
         }
     }
 
@@ -297,7 +329,7 @@ public sealed class AclStore
     private static RoleAcl? ParseRole(string text) =>
         JsonSerializer.Deserialize<RoleAcl>(text, JsonOptions);
 
-    private sealed record BuiltinTemplate(RoleAcl Acl, string Text);
+    private sealed record BuiltinTemplate(RoleAcl Acl, string Text, string? Hash);
 
     private sealed class RoleAcl
     {

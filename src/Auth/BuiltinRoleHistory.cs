@@ -1,25 +1,25 @@
+using Sas.Logging;
+
 namespace Sas.Auth;
 
 /// <summary>
-/// Historical shipped default contents of <c>builtin/roles/*.json</c>.
+/// Historical shipped default contents of <c>builtin/roles/*.json</c>, loaded
+/// from the embedded <c>builtin/roles/history/*.json</c> resources
+/// (<c>acl.history.&lt;role&gt;.&lt;label&gt;.json</c>).
 ///
 /// On startup a role file is only upgraded when its canonical JSON hash matches
 /// one of the defaults below. Any other content is treated as a local custom
 /// file and left untouched.
 ///
-/// Maintenance: every time a builtin role file changes and its <c>_version</c>
-/// is incremented, append the previous default content to the matching list.
-/// Do not edit existing entries - older deployments may still be running them.
+/// Maintenance: the history directory is append-only. Before changing a
+/// builtin role file, copy its current content into <c>history/</c> under a new
+/// label and bump the file's <c>_version</c>. Never edit or delete an existing
+/// history file - older deployments may still be running it.
 /// </summary>
 internal static class BuiltinRoleHistory
 {
-    private static readonly Dictionary<string, string[]> Defaults =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["user.json"] = [UserV1],
-            ["admin.json"] = [AdminV1],
-            ["super.json"] = [SuperV1]
-        };
+    private const string ResourcePrefix = "acl.history.";
+    private const string JsonExtension = ".json";
 
     private static readonly Dictionary<string, HashSet<string>> Hashes = BuildHashes();
 
@@ -29,77 +29,56 @@ internal static class BuiltinRoleHistory
     private static Dictionary<string, HashSet<string>> BuildHashes()
     {
         var result = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var assembly = typeof(BuiltinRoleHistory).Assembly;
 
-        foreach (var (fileName, contents) in Defaults)
+        foreach (var name in assembly.GetManifestResourceNames()
+                     .Where(n => n.StartsWith(ResourcePrefix, StringComparison.Ordinal)))
         {
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var content in contents)
+            var stem = name[ResourcePrefix.Length..];
+
+            if (!stem.EndsWith(JsonExtension, StringComparison.OrdinalIgnoreCase))
             {
-                var hash = RoleJson.Hash(content);
-                if (hash != null)
-                    set.Add(hash);
+                Logger.Error($"ACL roles: history resource {name} is not a .json file, ignoring");
+                continue;
             }
 
-            result[fileName] = set;
+            stem = stem[..^JsonExtension.Length];
+
+            var separator = stem.IndexOf('.');
+            if (separator <= 0 || separator == stem.Length - 1)
+            {
+                Logger.Error($"ACL roles: history resource {name} must be named <role>.<label>.json, ignoring");
+                continue;
+            }
+
+            var fileName = stem[..separator] + JsonExtension;
+
+            try
+            {
+                using var stream = assembly.GetManifestResourceStream(name);
+                if (stream == null)
+                    continue;
+
+                using var reader = new StreamReader(stream);
+                var hash = RoleJson.Hash(reader.ReadToEnd());
+
+                if (hash == null)
+                {
+                    Logger.Error($"ACL roles: history resource {name} is not valid JSON, ignoring");
+                    continue;
+                }
+
+                if (!result.TryGetValue(fileName, out var set))
+                    result[fileName] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                set.Add(hash);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"ACL roles: failed to load history resource {name}: {ex.Message}");
+            }
         }
 
         return result;
     }
-
-    private const string UserV1 = """
-        {
-          "role": "user",
-          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
-          "pub": [
-            "FMO/QSO/+",
-            "FMO/LATE/UID_V1/{uid}"
-          ],
-          "sub": [
-            "FMO/QSO/UID/{uid}",
-            "FMO/LATE/UID_V1/{uid}",
-            "FMO/PROFILE",
-            "FMO/MUTELIST",
-            "FMO/REMOTE_CONTROL",
-            "FMO/SERVER_INFO/#"
-          ]
-        }
-        """;
-
-    private const string AdminV1 = """
-        {
-          "role": "admin",
-          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
-          "pub": [
-            "FMO/QSO/+",
-            "FMO/LATE/UID_V1/{uid}",
-            "FMO/MUTELIST"
-          ],
-          "sub": [
-            "FMO/QSO/UID/{uid}",
-            "FMO/LATE/UID_V1/{uid}",
-            "FMO/PROFILE",
-            "FMO/REMOTE_CONTROL",
-            "FMO/SERVER_INFO/#"
-          ]
-        }
-        """;
-
-    private const string SuperV1 = """
-        {
-          "role": "super",
-          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
-          "pub": [
-            "FMO/QSO/+",
-            "FMO/LATE/UID_V1/{uid}",
-            "FMO/PROFILE",
-            "FMO/MUTELIST",
-            "FMO/REMOTE_CONTROL",
-            "FMO/SERVER_INFO/#"
-          ],
-          "sub": [
-            "FMO/QSO/UID/{uid}",
-            "FMO/LATE/UID_V1/{uid}"
-          ]
-        }
-        """;
 }

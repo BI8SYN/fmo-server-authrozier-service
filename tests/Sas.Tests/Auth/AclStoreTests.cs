@@ -230,7 +230,7 @@ public sealed class AclStoreTests
             RoleJson.Hash(File.ReadAllText(roleFile)));
 
         using var doc = JsonDocument.Parse(File.ReadAllText(roleFile));
-        Assert.Equal(2, doc.RootElement.GetProperty("_version").GetInt32());
+        Assert.Equal(ExpectedTemplateVersion(fileName), doc.RootElement.GetProperty("_version").GetInt32());
 
         // 加载结果必须反映升级后的规则。
         var role = doc.RootElement.GetProperty("role").GetString()!;
@@ -244,6 +244,127 @@ public sealed class AclStoreTests
         };
         Assert.Equal(expectedDenyCount, acl.deny.Length);
     }
+
+    [Theory]
+    [InlineData("user.json", "user", 6)]
+    [InlineData("admin.json", "admin", 5)]
+    [InlineData("super.json", "super", 1)]
+    public void VersionlessLegacyDefault_IsUpgradedAndBackedUp(string fileName, string role, int denyCount)
+    {
+        using var temp = new TempDirectory("acl-sync-legacy");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var roleFile = Path.Combine(rolesDir, fileName);
+
+        // 最初开源版本：没有 _version、没有 deny、SERVER_INFO 不是通配符。
+        // 线上仍有大量部署停在这份默认上，必须能被识别并升级。
+        var legacy = fileName switch
+        {
+            "user.json" => UserV0Json,
+            "admin.json" => AdminV0Json,
+            "super.json" => SuperV0Json,
+            _ => throw new ArgumentOutOfRangeException(nameof(fileName))
+        };
+
+        File.WriteAllText(roleFile, legacy);
+
+        var store = new AclStore(rolesDir);
+
+        Assert.Equal(legacy, File.ReadAllText(roleFile + ".bak"));
+
+        var builtinFile = Path.Combine(AppContext.BaseDirectory, "builtin", "roles", fileName);
+        Assert.Equal(
+            RoleJson.Hash(File.ReadAllText(builtinFile)),
+            RoleJson.Hash(File.ReadAllText(roleFile)));
+
+        var acl = store.GetPermissions(role);
+        Assert.Equal(denyCount, acl.deny.Length);
+        Assert.Contains("FMO/SERVER_INFO/#", acl.sub.Concat(acl.pub));
+
+        if (role != "super")
+            Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/LATE/UID_V1/#" }, acl.deny);
+    }
+
+    [Fact]
+    public void SuperFrom1_2_0_IsUpgraded()
+    {
+        using var temp = new TempDirectory("acl-sync-super-1-2-0");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var superFile = Path.Combine(rolesDir, "super.json");
+
+        // 1.2.0 的 super：_version 2，但 sub 尚未补齐、也没有 SAFEPROBE deny。
+        File.WriteAllText(superFile, SuperV2NoSubJson);
+
+        var store = new AclStore(rolesDir);
+
+        Assert.Equal(SuperV2NoSubJson, File.ReadAllText(superFile + ".bak"));
+
+        var super = store.GetPermissions("super");
+        Assert.Contains("FMO/PROFILE", super.sub);
+        Assert.Contains("FMO/MUTELIST", super.sub);
+        Assert.Contains("FMO/REMOTE_CONTROL", super.sub);
+        Assert.Contains("FMO/SERVER_INFO/#", super.sub);
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, super.deny);
+    }
+
+    [Fact]
+    public void SameVersionShippedDefault_MissedVersionBump_IsRepaired()
+    {
+        using var temp = new TempDirectory("acl-sync-missed-bump");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var userFile = Path.Combine(rolesDir, "user.json");
+
+        // 历史默认被贴上了当前版本号：说明发版时漏了 _version 自增。
+        // 内容仍然不是用户自定义，必须自动修复并备份。
+        var misversioned = UserV1Json.Replace(
+            "\"role\": \"user\",",
+            "\"role\": \"user\",\n  \"_version\": 2,");
+
+        File.WriteAllText(userFile, misversioned);
+
+        var store = new AclStore(rolesDir);
+
+        Assert.Equal(misversioned, File.ReadAllText(userFile + ".bak"));
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, store.GetPermissions("user").deny);
+    }
+
+    [Fact]
+    public void CurrentContentWithOlderVersion_IsNotRewritten()
+    {
+        using var temp = new TempDirectory("acl-same-content-older-version");
+        var rolesDir = temp.CreateSubdirectory("roles");
+        var superFile = Path.Combine(rolesDir, "super.json");
+
+        // 1.2.1 播种的 super 内容与当前模板一致，只是 _version 还是 2。
+        // 规则已经相同，不应该改写文件，也不应生成 .bak。
+        var text = ReadEmbeddedTemplate("super.json").Replace("\"_version\": 3", "\"_version\": 2");
+        File.WriteAllText(superFile, text);
+
+        var store = new AclStore(rolesDir);
+
+        Assert.Equal(text, File.ReadAllText(superFile));
+        Assert.False(File.Exists(superFile + ".bak"));
+        Assert.Contains(new AclDenyRule { Action = "all", Topic = "FMO/SAFEPROBE/#" }, store.GetPermissions("super").deny);
+    }
+
+    [Fact]
+    public void HistoryTemplates_AreNotSeededIntoRolesDirectory()
+    {
+        using var temp = new TempDirectory("acl-history-not-seeded");
+        var rolesDir = temp.CreateSubdirectory("roles");
+
+        _ = new AclStore(rolesDir);
+
+        // 历史模板只能用于哈希比对，绝不能出现在生效目录里。
+        var names = Directory.GetFiles(rolesDir, "*.json")
+            .Select(n => Path.GetFileName(n)!)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(["admin.json", "super.json", "user.json"], names);
+    }
+
+    private static int ExpectedTemplateVersion(string fileName) =>
+        fileName == "super.json" ? 3 : 2;
 
     [Fact]
     public void CustomisedRoleFile_IsNotUpgraded()
@@ -497,6 +618,112 @@ public sealed class AclStoreTests
         }
         """;
 
+    // 最初开源版本的原样内容，用于验证历史默认识别与自动升级。
+    private const string UserV0Json = """
+        {
+          "role": "user",
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/MUTELIST",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO"
+          ]
+        }
+        """;
+
+    private const string AdminV0Json = """
+        {
+          "role": "admin",
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/MUTELIST"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO"
+          ]
+        }
+        """;
+
+    private const string SuperV0Json = """
+        {
+          "role": "super",
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/MUTELIST",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}"
+          ]
+        }
+        """;
+
+    // 1.2.0 首次带 _version: 2 的 super：sub 未补齐、deny 为空。
+    private const string SuperV2NoSubJson = """
+        {
+          "role": "super",
+          "_version": 2,
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/MUTELIST",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO/#"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}"
+          ],
+          "deny": []
+        }
+        """;
+
+    // 补齐 sub、但尚未加入 SAFEPROBE deny 的 v2 super。
+    private const string SuperV2NoDenyJson = """
+        {
+          "role": "super",
+          "_version": 2,
+          "all": ["FMO/RAW", "FMO/TELE", "FMO/USER_RIG"],
+          "pub": [
+            "FMO/QSO/+",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/MUTELIST",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO/#"
+          ],
+          "sub": [
+            "FMO/QSO/UID/{uid}",
+            "FMO/LATE/UID_V1/{uid}",
+            "FMO/PROFILE",
+            "FMO/MUTELIST",
+            "FMO/REMOTE_CONTROL",
+            "FMO/SERVER_INFO/#"
+          ],
+          "deny": []
+        }
+        """;
+
     [Fact]
     public void SeededBuiltinRoles_MatchBuiltinJsonFiles()
     {
@@ -568,7 +795,7 @@ public sealed class AclStoreTests
         Assert.Equal(expectedRole, root.GetProperty("role").GetString());
 
         // 当前发布版本必须带 _version，升级逻辑依赖它。
-        Assert.Equal(2, root.GetProperty("_version").GetInt32());
+        Assert.Equal(ExpectedTemplateVersion(fileName), root.GetProperty("_version").GetInt32());
 
         foreach (var key in new[] { "all", "pub", "sub", "deny" })
         {
@@ -611,6 +838,39 @@ public sealed class AclStoreTests
     public void BuiltinRoleHistory_RejectsUnknownFile()
     {
         Assert.False(BuiltinRoleHistory.IsDefault("no-such-role.json", "any"));
+    }
+
+    [Theory]
+    [InlineData("user.json", UserV0Json)]
+    [InlineData("user.json", UserV1Json)]
+    [InlineData("admin.json", AdminV0Json)]
+    [InlineData("admin.json", AdminV1Json)]
+    [InlineData("super.json", SuperV0Json)]
+    [InlineData("super.json", SuperV1Json)]
+    [InlineData("super.json", SuperV2NoSubJson)]
+    [InlineData("super.json", SuperV2NoDenyJson)]
+    public void BuiltinRoleHistory_ContainsEveryShippedDefault(string fileName, string content)
+    {
+        var hash = RoleJson.Hash(content);
+
+        Assert.NotNull(hash);
+        Assert.True(
+            BuiltinRoleHistory.IsDefault(fileName, hash!),
+            $"{fileName} 的历史默认缺少这一版内容，停留在该版本的部署将无法升级。");
+    }
+
+    [Theory]
+    [InlineData("user.json", UserV1Json)]
+    [InlineData("admin.json", AdminV1Json)]
+    [InlineData("super.json", SuperV1Json)]
+    public void BuiltinRoleHistory_DoesNotMatchCustomisedContent(string fileName, string shipped)
+    {
+        // 在官方默认上增删一条规则即为自定义，绝不能被视为可覆盖。
+        var custom = shipped.Replace("\"FMO/QSO/+\"", "\"FMO/QSO/+\", \"FMO/CUSTOM/#\"");
+        var hash = RoleJson.Hash(custom);
+
+        Assert.NotNull(hash);
+        Assert.False(BuiltinRoleHistory.IsDefault(fileName, hash!));
     }
 
     private static string ReadEmbeddedTemplate(string fileName)

@@ -34,6 +34,12 @@
     <EmbeddedResource Include="builtin\roles\*.json">
       <LogicalName>builtin.roles.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
+    <!-- Historical defaults used by AclStore to recognise "shipped, not
+         customised" role files. Deliberately embedded under a different
+         prefix so they are never mistaken for active templates. -->
+    <EmbeddedResource Include="builtin\roles\history\*.json">
+      <LogicalName>acl.history.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
