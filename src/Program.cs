@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -22,6 +21,12 @@ if (args.Any(a => a == "--help" || a == "-h"))
     Environment.Exit(0);
 }
 
+if (args.Any(a => a is "--version" or "-v"))
+{
+    Console.WriteLine(GetCurrentVersion().Split('+')[0]);
+    return;
+}
+
 if (foundCommands.Length > 1)
 {
     Console.Error.WriteLine("错误：不能同时使用多个管理命令。 / Cannot use multiple management commands at once.");
@@ -43,7 +48,7 @@ if (foundCommands.Length > 0 && args.Any(a => a == "--update"))
 
 if (args.Any(a => a == "--update"))
 {
-    await CheckUpdateCommand();
+    await CheckUpdateCommand(args.Any(a => a is "--yes" or "-y"));
     return;
 }
 
@@ -245,9 +250,13 @@ static async Task CheckVersionAsync(string currentVersion)
         {
             Logger.Warn("│  Update: docker pull fmo/sas:latest && docker compose up -d");
         }
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            Logger.Warn("│  Download: https://github.com/BG5ESN/fmo-server-authrozier-service/releases");
+        }
         else
         {
-            Logger.Warn("│  Update now: sas --update");
+            Logger.Warn("│  Upgrade: curl -fsSL https://bg5esn.com/share/fmo/sas-installer/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh --upgrade");
         }
 
         Logger.Warn("└─────────────────────────────────────────────────────────────────────────────");
@@ -258,16 +267,27 @@ static async Task CheckVersionAsync(string currentVersion)
     }
 }
 
-static async Task CheckUpdateCommand()
+static async Task CheckUpdateCommand(bool autoYes)
 {
     var version = GetCurrentVersion();
-    Console.WriteLine($"SAS version: {version}");
+    Console.WriteLine($"SAS version: {version.Split('+')[0]}");
 
     if (ConfigParser.IsRunningInDocker())
     {
         Console.WriteLine();
         Console.WriteLine("Running in Docker. Update with:");
         Console.WriteLine("  docker pull fmo/sas:latest && docker compose up -d");
+        return;
+    }
+
+    const string installerUrl = "https://bg5esn.com/share/fmo/sas-installer/install.sh";
+    var command = $"curl -fsSL {installerUrl} -o /tmp/install.sh && sudo bash /tmp/install.sh --upgrade";
+
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        Console.WriteLine();
+        Console.WriteLine("SAS 升级请下载最新版本并替换 sas.exe / Download the latest release:");
+        Console.WriteLine("  https://github.com/BG5ESN/fmo-server-authrozier-service/releases");
         return;
     }
 
@@ -280,138 +300,64 @@ static async Task CheckUpdateCommand()
         var doc = JsonDocument.Parse(json).RootElement;
         var latest = doc.GetProperty("version").GetString() ?? "";
 
-        if (!ConfigParser.TryParseCleanVersion(latest, out var remote) ||
-            !ConfigParser.TryParseCleanVersion(version, out var local))
+        if (ConfigParser.TryParseCleanVersion(latest, out var remote) &&
+            ConfigParser.TryParseCleanVersion(version, out var local))
         {
-            Console.WriteLine("Failed to parse version.");
-            return;
-        }
-
-        if (remote <= local)
-        {
-            Console.WriteLine("Already up to date.");
-            return;
-        }
-
-        Console.WriteLine($"v{latest} available!");
-
-        if (!doc.TryGetProperty("assets", out var assets))
-        {
-            Console.WriteLine("No download assets found in sas.json.");
-            return;
-        }
-
-        var rid = RuntimeInformation.RuntimeIdentifier;
-        if (!assets.TryGetProperty(rid, out var downloadUrl))
-        {
-            Console.WriteLine($"No asset for platform: {rid}");
-            return;
-        }
-
-        var dl = downloadUrl.GetString() ?? "";
-        Console.WriteLine($"Downloading {dl}...");
-
-        var tempDir = Path.Combine(Path.GetTempPath(), "sas_update");
-        if (Directory.Exists(tempDir))
-            Directory.Delete(tempDir, true);
-        Directory.CreateDirectory(tempDir);
-
-        var ext = dl.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ? ".zip" : ".tar.gz";
-        var archivePath = Path.Combine(tempDir, $"update{ext}");
-
-        using (var response = await http.GetAsync(dl, HttpCompletionOption.ResponseHeadersRead))
-        {
-            response.EnsureSuccessStatusCode();
-            var total = response.Content.Headers.ContentLength ?? -1;
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            await using var fs = File.Create(archivePath);
-            var buffer = new byte[8192];
-            long read = 0;
-            int len;
-            while ((len = await stream.ReadAsync(buffer)) > 0)
-            {
-                await fs.WriteAsync(buffer.AsMemory(0, len));
-                read += len;
-                if (total > 0)
-                {
-                    var pct = (int)(read * 100 / total);
-                    var bar = new string('#', pct / 2) + new string(' ', 50 - pct / 2);
-                    Console.Write($"\r  [{bar}] {pct,3}% {read / 1024,5:N0}KB / {total / 1024,5:N0}KB");
-                }
-            }
-
-            Console.WriteLine();
-        }
-
-        Console.WriteLine("Extracting...");
-        if (ext == ".zip")
-            ZipFile.ExtractToDirectory(archivePath, tempDir);
-        else
-            ExtractTarGz(archivePath, tempDir);
-        File.Delete(archivePath);
-
-        var exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "sas.exe" : "sas";
-        var newExe = Directory.GetFiles(tempDir, exeName, SearchOption.AllDirectories).FirstOrDefault()
-                     ?? throw new InvalidOperationException($"{exeName} not found in archive");
-
-        Console.WriteLine("Ready to update. Replacing binary...");
-
-        var exePath = Environment.ProcessPath ?? "";
-        var scriptExt = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "bat" : "sh";
-        var scriptPath = Path.Combine(Path.GetTempPath(), $"sas_update.{scriptExt}");
-
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            File.WriteAllText(scriptPath, $"""
-                                           @echo off
-                                           setlocal
-                                           :wait
-                                           timeout /t 1 /nobreak >nul
-                                           tasklist /fi "PID eq {Environment.ProcessId}" 2>nul | findstr "{Environment.ProcessId}" >nul
-                                           if not errorlevel 1 goto wait
-                                           move /y "{newExe}" "{exePath}"
-                                           rmdir /s /q "{tempDir}"
-                                           echo SAS updated to v{latest}. Run 'sas' to start.
-                                           pause
-                                           del "%~f0"
-                                           """);
+            Console.WriteLine(remote <= local
+                ? "Already up to date."
+                : $"v{latest} available!");
         }
         else
         {
-            var pid = Environment.ProcessId;
-            File.WriteAllText(scriptPath,
-                $"#!/bin/sh\n" +
-                $"while kill -0 {pid} 2>/dev/null; do sleep 1; done\n" +
-                $"mv \"{newExe}\" \"{exePath}\"\n" +
-                $"chmod +x \"{exePath}\"\n" +
-                $"rm -rf \"{tempDir}\"\n" +
-                $"echo \"SAS updated to v{latest}. Run 'sas' to start.\"\n" +
-                $"rm \"$0\"\n");
-            try
-            {
-                System.Diagnostics.Process.Start("chmod", $"+x \"{scriptPath}\"")?.WaitForExit();
-            }
-            catch
-            {
-            }
+            Console.WriteLine("Failed to parse version, continuing.");
         }
-
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            System.Diagnostics.Process.Start("cmd", $"/c \"{scriptPath}\"");
-        else
-            System.Diagnostics.Process.Start("sh", scriptPath);
-
-        Environment.Exit(0);
     }
     catch (Exception ex)
     {
-        Console.WriteLine();
-        Console.WriteLine($"Update failed: {ex.Message}");
+        Console.WriteLine($"version check failed ({ex.Message}), continuing.");
     }
-}
 
-static void ExtractTarGz(string archivePath, string destDir)
-{
-    System.Diagnostics.Process.Start("tar", $"-xzf \"{archivePath}\" -C \"{destDir}\"")
-        ?.WaitForExit(30_000);
+    Console.WriteLine();
+    Console.WriteLine("SAS 升级通过官方安装脚本完成（覆盖程序，保留配置）/ Upgrade with the official installer:");
+    Console.WriteLine($"  {command}");
+
+    if (!autoYes)
+    {
+        Console.WriteLine();
+        Console.WriteLine("提示：加 --yes 可直接执行升级脚本 / Add --yes to run it now.");
+        return;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("Running upgrade script...");
+
+    try
+    {
+        var scriptPath = Path.Combine(Path.GetTempPath(), "sas-install.sh");
+        using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) })
+        {
+            var script = await http.GetStringAsync(installerUrl);
+            await File.WriteAllTextAsync(scriptPath, script);
+        }
+
+        var isRoot = string.Equals(Environment.UserName, "root", StringComparison.Ordinal);
+        var psi = isRoot
+            ? new System.Diagnostics.ProcessStartInfo("bash", $"\"{scriptPath}\" --upgrade --yes")
+            : new System.Diagnostics.ProcessStartInfo("sudo", $"bash \"{scriptPath}\" --upgrade --yes");
+        psi.UseShellExecute = false;
+        var process = System.Diagnostics.Process.Start(psi);
+        process?.WaitForExit();
+        if (process != null && process.ExitCode != 0)
+        {
+            Console.WriteLine($"升级脚本退出码: {process.ExitCode}");
+            Console.WriteLine("Please run manually:");
+            Console.WriteLine($"  {command}");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Failed to run upgrade script: {ex.Message}");
+        Console.WriteLine("Please run manually:");
+        Console.WriteLine($"  {command}");
+    }
 }

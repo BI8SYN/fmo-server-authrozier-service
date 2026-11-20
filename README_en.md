@@ -67,7 +67,7 @@ Only devices that pass verification can establish a connection; when the network
 - Login Audit Archive – Login payloads and certificate chains archived per callsign; logs include Root SN and request ID
 - EMQX HTTP Auth Integration – Acts as an EMQX Broker HTTP authentication callback
 - Cluster Support – Multiple MQTT Brokers share a single SAS instance for authentication
-- OTA Update – Built-in version checking and upgrade entry point
+- OTA Update – Built-in version checking; upgrades are applied by the official installer script
 - Cross-Platform – Windows / Linux / macOS (x64 & ARM64)
 - Docker Compose Deployment – Orchestrates SAS and EMQX with a preconfigured internal HTTP authentication callback
 - Persistent Runtime Configuration – `sas-data` and `emqx-data` volumes retain configuration, certificates, and broker data
@@ -232,7 +232,16 @@ Body: { "username": "${username}", "password": "${password}" }
 
 ## Configuration Reference
 
-On first run, SAS writes configuration to `~/.sas/config.json` (Windows: `%USERPROFILE%\.sas\config.json`). This file is the single source of configuration; no arguments are needed on subsequent launches.
+On first run, SAS writes configuration to the default configuration file. The default path is resolved in this order:
+
+1. `--config <path>` on the command line
+2. `SAS_CONFIG` environment variable
+3. System config for the standard install directory (only when the file exists):
+   - Linux: executable in `/opt/fmo-sas` → `/etc/fmo-sas/config.json`
+   - macOS: executable in `/usr/local/opt/fmo-sas` → `/usr/local/etc/fmo-sas/config.json`
+4. `~/.sas/config.json` (Windows: `%USERPROFILE%\.sas\config.json`)
+
+The official installer always passes `--config` explicitly. This file is the single source of configuration; no arguments are needed on subsequent launches.
 
 ### config.json Structure
 
@@ -464,16 +473,27 @@ When `http.addr` is set to `0.0.0.0`, SAS lists the available IPv4 addresses wit
 
 ## OTA Update
 
-SAS has built-in version checking and update support:
+SAS has built-in version checking. Upgrades are performed by the official installer script, which replaces the program files while keeping the configuration and data directories intact:
 
 ```bash
-# Manually check and update to the latest version
+# Check for updates and print the upgrade command
 sas --update
+
+# Download and run the official upgrade script (Linux / macOS)
+sas --update --yes
+```
+
+Or run it manually:
+
+```bash
+curl -fsSL https://bg5esn.com/share/fmo/sas-installer/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh --upgrade
 ```
 
 - **Auto-check**: Checks for new versions at startup and prints the upgrade command when one is available
 - **Disable auto-check**: Set `"update": { "enabled": false }` in `config.json`
-- **Docker environment**: Detects the Docker runtime and suggests updating via `docker pull`
+- **Docker environment**: Suggests updating via `docker pull`
+- **Windows**: Prints the latest release link; replace `sas.exe` manually
+- **Legacy deployments**: For manual installs or versions before v1.0.5, see the "Legacy deployment upgrades" section in [SAS OTA Update](docs/V4.0%20SAS%20OTA%20Update.md)
 
 ---
 
@@ -532,7 +552,8 @@ fmo-server-authorizer-service/
 │       └── roles/                  ← Role permission definitions (super/admin/user)
 ├── scripts/
 │   ├── publish.ps1                 ← Multi-platform build & package
-│   ├── install.sh                  ← Linux/macOS install script
+│   ├── install.sh                  ← Linux/macOS install & upgrade script
+│   ├── uninstall.sh                ← Linux/macOS uninstall script
 │   └── install.ps1                 ← Windows install script
 ├── config/
 │   └── config.example.json         ← Example configuration
@@ -567,6 +588,21 @@ fmo-server-authorizer-service/
 
 CRL cache directories are keyed by certificate fingerprint (`{type}-{safeName}-{fp16}`). Legacy `crl/{sn}/` caches are ignored and fetched again. With `crl.mode=strict`, authentication is denied from startup until the first CRL fetch succeeds; monitor the log for `Root CRL updated`, or start in `soft` mode to warm the cache before switching to `strict`.
 
+> The layout above is the default when `--config` / `--roots-dir` / `--archive-dir` are not specified. The official installer uses `/etc/fmo-sas/config.json` for configuration (macOS: `/usr/local/etc/fmo-sas/config.json`) and the running user's `~/.sas` for data (root: `/root/.sas` on Linux, `/var/root/.sas` on macOS). When `sas` runs from the standard install directory, it automatically reads the system config; other locations or a missing system config fall back to `~/.sas`.
+
+### Directory rules for the official installer
+
+| Purpose | Linux | macOS |
+|---------|-------|-------|
+| Program | `/opt/fmo-sas` | `/usr/local/opt/fmo-sas` |
+| Configuration | `/etc/fmo-sas/config.json` | `/usr/local/etc/fmo-sas/config.json` |
+| Data | `/root/.sas` | `/var/root/.sas` |
+
+- Services always pass `--config` explicitly; upgrades only replace the program directory (`sas` and `builtin/`).
+- The data directory is the running user's `~/.sas`; for root this is `/root/.sas` on Linux and `/var/root/.sas` on macOS.
+- Upgrades never migrate data; uninstalling preserves `~/.sas`.
+- If both `~/.sas/config.json` and the system config exist, the installer/upgrade prints a warning that the former is not in effect.
+
 `fp16` is the first 16 hex characters (64 bits) of the SHA-256 fingerprint and keeps directory names readable alongside `safeName`. Real deployments have very few CAs, so collisions can be ignored; even if two directories collide, every CRL is still verified with `VerifyBy` before use, so a mismatched cache is never trusted and one CA's revocation state cannot leak into another.
 
 Intermediate certificates only appear in login payloads, so `CrlManager` cannot know or prefetch all Intermediate CRLs at startup. In `soft` mode, the first request that introduces an Intermediate with no local cache is allowed while the CRL is fetched in the background; later requests hit the cache. `crl.mode=strict` should be used, or the cache directory pre-populated, when revocation must be enforced from the first request.
@@ -592,7 +628,7 @@ Intermediate certificates only appear in login payloads, so `CrlManager` cannot 
 1. **No Sensitive Data**: All fields in `config.json` are public information (callsigns, certificate fingerprints, network addresses, etc.) — no private keys or passwords are stored. Security depends on the private key held by the device.
 2. **Internal Deployment**: The HTTP endpoint should listen on `127.0.0.1` or internal addresses and should not be exposed directly to the public internet.
 3. **Configuration Source**: After initial setup, configuration can be modified by editing `config.json` (restart to apply) or by re-launching with CLI arguments.
-4. **Upgrades**: `sas --update` downloads the latest version and restarts the service (or disable auto-check with `update.enabled = false`).
+4. **Upgrades**: Use the official installer to overwrite the program files; configuration and data directories are preserved (or disable auto-check with `update.enabled = false`).
 5. **Device Side**: FMO device firmware must use SAS HTTP authenticator mode (carrying certificate information in username/password during MQTT CONNECT).
 6. **Login Archive**: Successful logins store full payloads; failed logins store summaries by default. Archive files contain the certificate chain and proof signatures (no private keys) and are intended for auditing and troubleshooting. Access to the archive directory should be restricted, and `archive.retentionDays`, `archive.maxFileBytes`, and `archive.maxRecordBytes` should be adjusted as needed.
 7. **Entry Protection**: `username` is limited to 32 UTF-8 bytes and callsign characters only. The default global rate limit is 600 requests/minute. A callsign breaker only counts failures after certificate chain verification, so early spoofed failures cannot affect legitimate users. These thresholds can be tuned in `http.rateLimit`.

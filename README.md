@@ -67,7 +67,7 @@ FMO（FM Over Internet）Server Authorizer Service 是面向业余无线电 FMO 
 - 登录审计归档 – 按呼号保存登录报文与证书链，日志包含 Root SN 与请求 ID
 - EMQX HTTP 认证集成 – 作为 EMQX Broker 的 HTTP 认证回调
 - 集群支持 – 多个 MQTT Broker 共用同一 SAS 实例进行认证
-- OTA 更新 – 内置版本检查与升级入口
+- OTA 更新 – 内置版本检查，升级由官方脚本覆盖完成
 - 跨平台 – Windows / Linux / macOS（x64 与 ARM64）
 - Docker Compose 部署 – 编排 SAS 与 EMQX，并预置内部 HTTP 认证回调
 - 持久化运行配置 – `sas-data` 与 `emqx-data` 卷保存配置、证书与 Broker 数据
@@ -244,7 +244,16 @@ Body: { "username": "${username}", "password": "${password}" }
 
 ## 配置参考
 
-首次运行时 SAS 将配置写入 `~/.sas/config.json`（Windows 上为 `%USERPROFILE%\.sas\config.json`）。该文件是配置的唯一来源，后续启动无需参数。
+首次运行时 SAS 将配置写入默认配置文件。默认路径按以下顺序解析：
+
+1. 命令行 `--config <path>`
+2. 环境变量 `SAS_CONFIG`
+3. 标准安装目录下的系统配置（仅当文件存在）：
+   - Linux：程序位于 `/opt/fmo-sas` → `/etc/fmo-sas/config.json`
+   - macOS：程序位于 `/usr/local/opt/fmo-sas` → `/usr/local/etc/fmo-sas/config.json`
+4. `~/.sas/config.json`（Windows：`%USERPROFILE%\.sas\config.json`）
+
+官方安装脚本始终显式传 `--config`。该文件是配置的唯一来源，后续启动无需参数。
 
 ### config.json 结构
 
@@ -476,16 +485,27 @@ docker compose restart sas
 
 ## OTA 更新
 
-SAS 内置版本检查与更新入口：
+SAS 内置版本检查，升级通过官方安装脚本完成（覆盖程序目录，保留配置文件和数据目录）：
 
 ```bash
-# 手动检查并更新到最新版本
+# 检查更新并打印升级命令
 sas --update
+
+# 直接下载并执行官方升级脚本（Linux / macOS）
+sas --update --yes
+```
+
+也可以手动执行：
+
+```bash
+curl -fsSL https://bg5esn.com/share/fmo/sas-installer/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh --upgrade
 ```
 
 - **自动检查**：每次启动时检查新版本，检测到新版本时输出升级命令
 - **关闭自动检查**：在 `config.json` 中设置 `"update": { "enabled": false }`
-- **Docker 环境**：检测 Docker 运行环境，并提示使用 `docker pull` 更新
+- **Docker 环境**：提示使用 `docker pull` 更新
+- **Windows**：提示下载最新发布包并替换 `sas.exe`
+- **旧部署**：手动安装或 v1.0.5 之前的部署，请参考 [SAS OTA 更新机制](docs/V4.0%20SAS%20OTA%20Update.md) 的「旧部署升级」小节
 
 ---
 
@@ -544,7 +564,8 @@ fmo-server-authorizer-service/
 │       └── roles/                  ← 角色权限定义 (super/admin/user)
 ├── scripts/
 │   ├── publish.ps1                 ← 多平台编译打包
-│   ├── install.sh                  ← Linux/macOS 安装脚本
+│   ├── install.sh                  ← Linux/macOS 安装/升级脚本
+│   ├── uninstall.sh                ← Linux/macOS 卸载脚本
 │   └── install.ps1                 ← Windows 安装脚本
 ├── config/
 │   └── config.example.json         ← 配置文件示例
@@ -579,6 +600,21 @@ fmo-server-authorizer-service/
 
 `crl/` 下的缓存目录以证书指纹命名（`{type}-{safeName}-{fp16}`）。旧版本的 `crl/{sn}/` 缓存会被忽略并重新拉取。使用 `crl.mode=strict` 时，升级后首次启动到 CRL 拉取完成之间会拒绝认证；可先观察日志中的 `Root CRL updated`，或临时切到 `soft` 预热后再切回 `strict`。
 
+> 上表是程序未指定 `--config` / `--roots-dir` / `--archive-dir` 时的默认布局。官方安装脚本使用：配置 `/etc/fmo-sas/config.json`（macOS `/usr/local/etc/fmo-sas/config.json`），数据统一为运行用户的 `~/.sas`（root 运行时 Linux 为 `/root/.sas`，macOS 为 `/var/root/.sas`）。在标准安装目录下手动运行 `sas` 时，程序会自动读取系统配置；其他目录或未安装系统配置时回落到 `~/.sas`。
+
+### 官方安装的目录规则
+
+| 用途 | Linux | macOS |
+|------|-------|-------|
+| 程序 | `/opt/fmo-sas` | `/usr/local/opt/fmo-sas` |
+| 配置 | `/etc/fmo-sas/config.json` | `/usr/local/etc/fmo-sas/config.json` |
+| 数据 | `/root/.sas` | `/var/root/.sas` |
+
+- 服务始终显式使用 `--config`，升级只覆盖程序目录（`sas` 与 `builtin/`）。
+- 数据目录是运行用户的 `~/.sas`；root 用户运行时 Linux 为 `/root/.sas`，macOS 为 `/var/root/.sas`。
+- 升级不迁移数据，卸载保留 `~/.sas`。
+- 安装/升级时若同时存在 `~/.sas/config.json` 与系统配置，脚本会提示前者不会生效。
+
 `fp16` 是 SHA-256 fingerprint 的前 16 个 hex 字符（64 bit），与 `safeName` 一起使目录名保持可读。实际部署的 CA 数量很少，碰撞概率可忽略；即使目录名相同，加载 CRL 时仍会用 `VerifyBy` 验签，签名不匹配的缓存不会被采用，不会把其他 CA 的吊销状态套用过来。
 
 Intermediate 证书只会在登录报文中出现，`CrlManager` 启动时无法预知并拉取所有 Intermediate CRL。`soft` 模式下，某个 Intermediate 第一次出现且本地没有缓存时，当前请求会先放行，同时在后台拉取；后续请求即可命中缓存。需要从第一次请求起就执行吊销检查时，应使用 `crl.mode=strict`，或提前将 CRL 缓存放入对应目录。
@@ -604,7 +640,7 @@ Intermediate 证书只会在登录报文中出现，`CrlManager` 启动时无法
 1. **无敏感数据**：`config.json` 中所有字段均为公开信息（呼号、证书指纹、网络地址等），不包含私钥或密码。安全性依赖设备端持有的私钥。
 2. **内网部署**：HTTP 端点应监听 `127.0.0.1` 或内网地址，不直接暴露到公网。
 3. **配置源**：首次初始化后，可通过编辑 `config.json` 修改配置（重启生效），也可通过 CLI 参数重新启动来更新配置。
-4. **升级**：`sas --update` 下载最新版本并重启（或关闭自动检查：`update.enabled = false`）。
+4. **升级**：使用官方安装脚本覆盖升级，配置文件和数据目录保持不变（或关闭自动检查：`update.enabled = false`）。
 5. **设备侧**：FMO 设备固件需使用 SAS HTTP 认证器模式（MQTT CONNECT 时 username/password 携带证书信息）。
 6. **登录归档**：成功登录保存完整报文，失败登录默认只保存摘要。归档文件包含完整证书链和 proof 签名（不含私钥），仅用于审计和故障排查。应限制归档目录访问权限，并按需调整 `archive.retentionDays`、`archive.maxFileBytes` 与 `archive.maxRecordBytes`。
 7. **入口防护**：`username` 最长 32 个 UTF-8 字节且只允许呼号字符；全局限流默认 600 次/分钟。同一呼号只有在证书链校验通过后连续失败才会临时熔断，早期失败不会因伪造呼号影响其他用户。阈值可在 `http.rateLimit` 中调整。

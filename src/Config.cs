@@ -12,6 +12,54 @@ internal sealed class Config
     private static readonly string HomeDir =
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
+    /// <summary>
+    /// Resolves the configuration file when --config is not given.
+    /// Priority: SAS_CONFIG env → system config (standard install directory only,
+    /// and only when the file exists) → ~/.sas/config.json.
+    /// </summary>
+    internal static string DefaultConfigPath() => ResolveConfigPath(
+        explicitPath: null,
+        envPath: Environment.GetEnvironmentVariable("SAS_CONFIG"),
+        baseDirectory: AppContext.BaseDirectory,
+        isWindows: OperatingSystem.IsWindows(),
+        fileExists: File.Exists,
+        homeDir: HomeDir);
+
+    internal static string ResolveConfigPath(
+        string? explicitPath,
+        string? envPath,
+        string baseDirectory,
+        bool isWindows,
+        Func<string, bool> fileExists,
+        string homeDir)
+    {
+        if (!string.IsNullOrWhiteSpace(explicitPath))
+            return explicitPath;
+
+        if (!string.IsNullOrWhiteSpace(envPath))
+            return envPath;
+
+        var systemPath = GetSystemConfigPath(baseDirectory, isWindows);
+        if (systemPath != null && fileExists(systemPath))
+            return systemPath;
+
+        return Path.Combine(homeDir, ".sas", "config.json");
+    }
+
+    internal static string? GetSystemConfigPath(string baseDirectory, bool isWindows)
+    {
+        if (isWindows)
+            return null;
+
+        var dir = baseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return dir switch
+        {
+            "/opt/fmo-sas" => "/etc/fmo-sas/config.json",
+            "/usr/local/opt/fmo-sas" => "/usr/local/etc/fmo-sas/config.json",
+            _ => null
+        };
+    }
+
     internal static string ConfigPath = "";
 
     internal static readonly string[] ManagementCommands =
@@ -139,7 +187,7 @@ internal sealed class Config
         }
         else
         {
-            ConfigPath = Path.Combine(HomeDir, ".sas", "config.json");
+            ConfigPath = DefaultConfigPath();
             if (File.Exists(ConfigPath))
             {
                 config = LoadFromFile();
@@ -517,7 +565,7 @@ internal sealed class Config
             Console.Error.WriteLine();
             Console.Error.WriteLine("  管理命令只接受 --config <路径>。 / Management commands only accept --config <path>.");
             Console.Error.WriteLine("  如需修改配置参数，请直接编辑配置文件 / To update config, edit the file directly:");
-            Console.Error.WriteLine($"    {explicitPath ?? Path.Combine(HomeDir, ".sas", "config.json")}");
+            Console.Error.WriteLine($"    {explicitPath ?? DefaultConfigPath()}");
             Console.Error.WriteLine();
             Console.Error.WriteLine("  或者分两步操作 / Or run in two steps:");
             Console.Error.WriteLine("    1. sas --mqtt-host xxx ...  （更新配置 / update config）");
@@ -525,8 +573,7 @@ internal sealed class Config
             Environment.Exit(1);
         }
 
-        ConfigPath = explicitPath
-                     ?? Path.Combine(HomeDir, ".sas", "config.json");
+        ConfigPath = explicitPath ?? DefaultConfigPath();
 
         if (!File.Exists(ConfigPath))
             Fail($"配置文件不存在：{ConfigPath}\n  请先运行 sas 完成首次配置，或指定 --config <路径>。 / Config file not found.");
@@ -972,8 +1019,12 @@ internal sealed class Config
         Console.WriteLine("用法 / Usage:");
         Console.WriteLine("  sas                                  交互式配置向导 / Interactive setup");
         Console.WriteLine("  sas --server-uid ... --cert-fingerprint ...   命令行初始化 / CLI init");
-        Console.WriteLine("  sas --update                         检查并应用更新 / Check and apply updates");
+        Console.WriteLine("  sas --update                         检查更新并打印升级命令 / Check updates and print upgrade command");
+        Console.WriteLine("  sas --update --yes                   下载并执行官方升级脚本 / Run the official upgrade script");
+        Console.WriteLine("  sas --version                        显示版本 / Show version");
         Console.WriteLine("  sas --help                           显示此帮助 / Show this help");
+        Console.WriteLine();
+        Console.WriteLine($"默认配置 / Default config: {DefaultConfigPath()}");
         Console.WriteLine();
         Console.WriteLine("管理员管理 / Admin Management:");
         Console.WriteLine("  sas --add-admin [--config <path>]    添加管理员 / Add admin");
